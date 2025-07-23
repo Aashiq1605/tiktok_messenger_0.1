@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from google_auth_oauthlib import Flow
+from google_auth_oauthlib.flow import Flow
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 import google.auth
