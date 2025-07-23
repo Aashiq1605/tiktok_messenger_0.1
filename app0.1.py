@@ -8,7 +8,7 @@ import os
 import json
 import base64
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
+# from dotenv import load_dotenv # REMOVE THIS LINE
 import re
 
 # Selenium imports
@@ -23,57 +23,72 @@ import time # For delays
 
 
 # Load environment variables from .env file
-load_dotenv()
+# load_dotenv() # REMOVED: Streamlit Cloud uses st.secrets directly
 
 # --- Configuration ---
 SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+
+# --- Access secrets via st.secrets ---
+# Ensure "google_client_id" and "google_client_secret" are set in Streamlit Cloud secrets
+if "google_client_id" not in st.secrets or "google_client_secret" not in st.secrets:
+    st.error("Google Client ID or Secret not found in Streamlit secrets. "
+             "Please configure them in your Streamlit Cloud app settings.")
+    st.stop()
+
+# Dynamically set redirect URIs for Streamlit Cloud
+# The deployed app URL will be available as an environment variable or can be set as a secret.
+# It's safest to manually set STREAMLIT_APP_URL as a secret to ensure it's correct.
+# Example: https://your-app-name.streamlit.app
+deployed_app_url = st.secrets.get("STREAMLIT_APP_URL", "http://localhost:8501") # Fallback for local
+deployed_app_origin = st.secrets.get("STREAMLIT_APP_ORIGIN", "http://localhost:8501") # Fallback for local
+
+
 CLIENT_SECRETS_FILE = {
     "web": {
-        "client_id": os.getenv("GOOGLE_CLIENT_ID"),
-        "project_id": "tiktok-affiliate-messenger", # You can put a dummy value here
+        "client_id": st.secrets["google_client_id"],
+        "project_id": "tiktok-affiliate-messenger", # This can remain a dummy value
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
-        "client_secret": os.getenv("GOOGLE_CLIENT_SECRET"),
-        "redirect_uris": ["http://localhost:8501"], # Streamlit's default local URL
-        "javascript_origins": ["http://localhost:8501"]
+        "client_secret": st.secrets["google_client_secret"],
+        "redirect_uris": [deployed_app_url], # USE THE DYNAMIC URL HERE
+        "javascript_origins": [deployed_app_origin] # USE THE DYNAMIC ORIGIN HERE
     }
 }
 
-# Ensure client ID and secret are loaded
-if not CLIENT_SECRETS_FILE["web"]["client_id"] or not CLIENT_SECRETS_FILE["web"]["client_secret"]:
-    st.error("Google Client ID or Secret not found. Please set them in the .env file.")
-    st.stop()
+# No need for this check if st.stop() is called above
+# if not CLIENT_SECRETS_FILE["web"]["client_id"] or not CLIENT_SECRETS_FILE["web"]["client_secret"]:
+#     st.error("Google Client ID or Secret not found. Please set them in the .env file.")
+#     st.stop()
 
 # --- Global Selenium Driver (Managed in session state) ---
 if 'driver' not in st.session_state:
     st.session_state.driver = None
 
 def get_selenium_driver():
-    # Only create a new driver if one doesn't exist in session state
     if st.session_state.driver is None:
         try:
             options = webdriver.ChromeOptions()
-            # No debuggerAddress needed for launching a new instance
+            # --- IMPORTANT: Add these for Streamlit Cloud deployment ---
+            options.add_argument("--headless") # Run Chrome in headless mode (no UI)
+            options.add_argument("--disable-gpu") # Required for some headless environments
+            options.add_argument("--window-size=1920x1080") # Set a default window size
+            options.add_argument("--no-sandbox") # Essential for environments like Streamlit Cloud
+            options.add_argument("--disable-dev-shm-usage") # Recommended to avoid resource issues
+            # Optional: Add arguments for better stability or specific behavior (some might be redundant with headless)
+            options.add_argument("--disable-infobars")
+            options.add_argument("--disable-extensions")
             
-            # Optional: Add arguments for better stability or specific behavior
-            options.add_argument("--start-maximized") # Maximize the browser window
-            options.add_argument("--disable-infobars") # Disable info bars
-            options.add_argument("--disable-extensions") # Disable extensions
-            options.add_argument("--no-sandbox") # Bypass OS security model (needed in some environments)
-            options.add_argument("--disable-dev-shm-usage") # Overcome limited resource problems
-
-            # You still need a Service object to specify chromedriver path if not in PATH
-            # Assuming chromedriver is in PATH or current directory
+            # Streamlit Cloud includes ChromeDriver, so Service() usually works without path
             service = Service() 
 
             driver = webdriver.Chrome(service=service, options=options)
             st.session_state.driver = driver
-            st.success("Launched a new Chrome instance!") # Simplified message
+            st.success("Launched a new Chrome instance (headless).") # Simplified message for cloud
         except WebDriverException as e:
             st.error(f"Failed to launch browser: {e}. "
                      f"Please ensure ChromeDriver is correctly installed and its version matches your Chrome browser. "
-                     f"Also, check system resources and permissions.")
+                     f"If running on Streamlit Cloud, ensure your code adheres to headless browser requirements.")
             st.session_state.driver = None
     return st.session_state.driver
 
@@ -100,7 +115,7 @@ def get_google_credentials():
                 creds = None
         else:
             flow = Flow.from_client_config(
-                CLIENT_SECRETS_FILE, SCOPES, redirect_uri='http://localhost:8501'
+                CLIENT_SECRETS_FILE, SCOPES, redirect_uri=CLIENT_SECRETS_FILE["web"]["redirect_uris"][0] # Use the dynamic redirect URI
             )
             auth_url, _ = flow.authorization_url(prompt='consent')
             st.session_state['auth_url'] = auth_url
@@ -175,7 +190,8 @@ def launch_tiktok_login():
         tiktok_login_url = "https://seller.tiktok.com/login/choose-region?redirect_url=https%3A%2F%2Faffiliate.tiktok.com%2Fseller%2Fim&needLogin=1"
         try:
             driver.get(tiktok_login_url)
-            st.success("Launched TikTok login in new Chrome instance.") # Simplified message
+            st.success("Launched TikTok login in new Chrome instance (check the external browser window).")
+            st.warning("You must manually log in to TikTok in the new browser window that just opened. After logging in, return to this Streamlit app.")
         except WebDriverException as e:
             st.error(f"Failed to open TikTok login page: {e}. Ensure the new browser instance launched correctly.")
     else:
