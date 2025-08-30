@@ -17,18 +17,24 @@ import time
 import subprocess
 
 # --- Chrome Debug Mode Config ---
+# On a Mac, the path to Chrome is /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
+# On Linux, it's typically /usr/bin/google-chrome-stable
+# On Windows, it can be C:\Program Files\Google\Chrome\Application\chrome.exe
+# IMPORTANT: This path must be correct for the OS where you run the app.
+# The `launch_chrome_instance` function will not work on Streamlit Cloud.
 CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 USER_DATA_DIR = os.path.expanduser("~/chrome_debug_profile")
 REMOTE_DEBUG_PORT = "9222"
 
 def launch_chrome_instance(store_id: str):
     """Launch Chrome in remote debugging mode automatically and open TikTok Seller for given store."""
-    subprocess.Popen(
-        ["pkill", "-f", "chrome_debug_profile"],
-        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
-    )
-    time.sleep(1)
-
+    # This function is intended for local development only.
+    # It will not work on Streamlit Cloud as there is no user-facing browser.
+    
+    # We'll remove the `pkill` command to prevent errors on systems where it's not installed.
+    # You can manually kill any existing instances before running if needed.
+    # The `subprocess.Popen` call might fail silently or raise an error on some systems.
+    
     tiktok_url = f"https://seller.tiktokglobalshop.com/account/login?shop_id={store_id}"
 
     cmd = [
@@ -39,9 +45,15 @@ def launch_chrome_instance(store_id: str):
         "--no-default-browser-check",
         tiktok_url
     ]
-    subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-
-    st.success(f"✅ Chrome launched in debug mode and opened TikTok Seller for store ID {store_id}")
+    
+    try:
+        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        st.success(f"✅ Chrome launched in debug mode and opened TikTok Seller for store ID {store_id}. Please ensure you are logged in.")
+        st.warning("Note: This feature only works on your local machine and will not launch a visible browser on Streamlit Cloud.")
+    except FileNotFoundError:
+        st.error(f"❌ Could not find Chrome executable at '{CHROME_PATH}'. Please check the path and try again.")
+    except Exception as e:
+        st.error(f"❌ An error occurred while trying to launch Chrome: {e}")
 
 
 # --- Streamlit UI Configuration ---
@@ -96,7 +108,7 @@ if not store_id:
     st.warning("Please enter your TikTok Store ID.")
 
 ### button to launch chrome with tiktok
-if st.button("Launch chrome instance", help="Start Chrome in debug mode automatically and open TikTok Seller."):
+if st.button("Launch Chrome Instance (Local Only)", help="Start Chrome in debug mode automatically and open TikTok Seller. This function is only for local use."):
     if store_id.strip():
         launch_chrome_instance(store_id)
     else:
