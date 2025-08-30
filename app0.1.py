@@ -21,35 +21,47 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException, InvalidArgumentException
 from selenium.webdriver.common.keys import Keys 
+from selenium.webdriver.chrome.options import Options
 
-# --- Selenium Driver Management for Streamlit Cloud ---
+# --- Global Selenium Driver Management ---
 if 'driver' not in st.session_state:
     st.session_state.driver = None
 
 def get_selenium_driver():
     """
-    Initializes and returns a headless Selenium WebDriver.
-    This function is tailored for Streamlit Cloud deployment.
+    Initializes and returns a Selenium WebDriver.
+    This function automatically detects if it's running locally or on Streamlit Cloud.
     """
     if st.session_state.driver is None:
+        is_cloud = os.environ.get('STREAMLIT_SERVER_RUNNING', 'false') == 'true'
+        
         try:
-            options = webdriver.ChromeOptions()
-            options.add_argument("--headless")
-            options.add_argument("--no-sandbox")
-            options.add_argument("--disable-dev-shm-usage")
-            options.add_argument("--disable-gpu")
-            options.add_argument("--window-size=1920,1080")
-            options.add_argument("--log-level=3")
-            
-            # This is the path for Chromium installed via packages.txt
-            service = Service(executable_path='/usr/bin/chromium-driver')
+            if is_cloud:
+                st.info("🌐 Detected Streamlit Cloud environment. Initializing headless driver.")
+                options = Options()
+                options.add_argument("--headless")
+                options.add_argument("--no-sandbox")
+                options.add_argument("--disable-dev-shm-usage")
+                options.add_argument("--disable-gpu")
+                options.add_argument("--window-size=1920,1080")
+                options.add_argument("--log-level=3")
+                service = Service(executable_path='/usr/bin/chromium-driver')
+                driver = webdriver.Chrome(service=service, options=options)
+            else:
+                st.info("💻 Detected local environment. Initializing local driver.")
+                # Assumes you have chromedriver installed and in your PATH.
+                # If not, you may need to provide the path explicitly, e.g., Service(executable_path='path/to/your/chromedriver')
+                service = Service() 
+                options = Options()
+                options.add_experimental_option("detach", True) # Keep browser open after script ends
+                driver = webdriver.Chrome(service=service, options=options)
 
-            driver = webdriver.Chrome(service=service, options=options)
             st.session_state.driver = driver
-            st.success("✅ Successfully initialized headless Chrome driver!")
+            st.success("✅ Successfully initialized Chrome driver!")
         except WebDriverException as e:
             st.error(f"❌ Failed to initialize Chrome driver: {e}")
-            st.warning("This application is configured to run on Streamlit Cloud. It will not launch a visible browser on your local machine.")
+            if not is_cloud:
+                st.warning("For local use, ensure you have Google Chrome and a matching version of chromedriver installed and in your system's PATH. You can download chromedriver from: https://googlechromelabs.github.io/chrome-for-testing/")
             st.session_state.driver = None
             st.stop()
     return st.session_state.driver
@@ -70,12 +82,25 @@ def apply_cookies(driver, cookies_json):
     try:
         cookies = json.loads(cookies_json)
         driver.delete_all_cookies()
+        
+        # Need to navigate to the domain first to set the cookies
+        base_url = "https://www.instagram.com/"
+        driver.get(base_url)
+        
         for cookie in cookies:
-            if 'domain' in cookie:
-                del cookie['domain']
-            if 'sameSite' in cookie:
-                del cookie['sameSite']
-            driver.add_cookie(cookie)
+            # Clean up keys that cause issues with Selenium's add_cookie method
+            if 'domain' in cookie: del cookie['domain']
+            if 'sameSite' in cookie: del cookie['sameSite']
+            if 'expiry' in cookie: del cookie['expiry'] # 'expiry' is a float, Selenium wants 'expirationDate' as an integer
+            
+            try:
+                driver.add_cookie(cookie)
+            except InvalidArgumentException as e:
+                st.warning(f"Could not add cookie: {cookie.get('name', 'N/A')}. Error: {e}")
+                
+        # Re-navigate to refresh the session
+        driver.get(base_url)
+        
         return True
     except Exception as e:
         st.error(f"❌ Failed to apply cookies: {e}")
@@ -200,7 +225,7 @@ def update_sheet_data(sheet_id, sheet_name, row_number, data_to_write, creds):
 st.title("💬 Instagram Affiliate Messenger")
 st.markdown("Automate Instagram messaging.")
 
-st.info("Since this app is running in a headless browser, you must provide your login session cookies to authenticate.")
+st.info("Since this app is configured for both local and cloud use, the driver will be initialized automatically for your environment.")
 
 # --- Cookie Management Section ---
 cookie_data = st.text_area(
@@ -340,8 +365,8 @@ if st.session_state.automation_running and st.session_state.get('influencer_list
     
     # Base URL to apply cookies to before navigation
     base_url = "https://www.instagram.com/"
-    driver.get(base_url)
     
+    # Apply cookies and then navigate to the chat URL
     if not apply_cookies(driver, cookie_data):
         st.warning("Failed to apply cookies. Please ensure they are valid and try again.")
         st.session_state.automation_running = False
@@ -354,9 +379,6 @@ if st.session_state.automation_running and st.session_state.get('influencer_list
     try:
         driver.get(chat_url)
         
-        # --- Using a robust selector for the message input box ---
-        # AVOID DYNAMIC CLASS NAMES LIKE 'x1n2onr6'
-        # A more stable approach is to find the <textarea> element with a specific placeholder or role.
         message_input_selector = 'textarea[placeholder*="Message..."]'
         
         WebDriverWait(driver, 40).until(
@@ -364,7 +386,6 @@ if st.session_state.automation_running and st.session_state.get('influencer_list
         )
         message_textarea = driver.find_element(By.CSS_SELECTOR, message_input_selector)
 
-        # Send all text messages first
         for i, msg_content in enumerate(messages_to_send):
             message_textarea.clear()
             message_textarea.send_keys(msg_content)
@@ -378,27 +399,24 @@ if st.session_state.automation_running and st.session_state.get('influencer_list
             st.session_state.last_status = f"Message {i+1} sent successfully."
             status_message_placeholder.success(st.session_state.last_status)
             
-            time.sleep(2) # Delay between messages
+            time.sleep(2)
 
-        # Image upload logic (Instagram-specific)
         if image_paths_to_send:
             st.warning("Warning: Image upload on Instagram is highly prone to failure. Use with caution.")
             st.session_state.last_status = f"Attempting to upload {len(image_paths_to_send)} image(s)..."
             status_message_placeholder.info(st.session_state.last_status)
             try:
-                # Instagram's file input can be tricky. This selector may change.
                 file_input_selector = 'input[accept*="image/jpeg,image/png,image/heic,image/heif,video/mp4,video/quicktime"]'
                 file_input_element = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, file_input_selector))
                 )
                 
-                # Join paths for multiple file upload
                 all_image_paths_string = "\n".join(image_paths_to_send)
                 file_input_element.send_keys(all_image_paths_string)
                 
                 st.session_state.last_status = "Image(s) sent to upload input. Waiting for Instagram to process..."
                 status_message_placeholder.success(st.session_state.last_status)
-                time.sleep(10) # Longer delay for upload and processing
+                time.sleep(10)
             except Exception as e:
                 st.session_state.last_status = f"Error during image upload: {e}. Proceeding without image for this influencer."
                 status_message_placeholder.error(st.session_state.last_status)
@@ -408,9 +426,8 @@ if st.session_state.automation_running and st.session_state.get('influencer_list
                         os.remove(temp_path)
                 st.session_state['uploaded_image_paths'] = []
 
-        # --- Move to Next Influencer ---
         st.session_state['current_influencer_index'] += 1
-        time.sleep(5) # Delay before moving to the next chat to avoid rate limits
+        time.sleep(5)
         
         if st.session_state.automation_running and st.session_state['current_influencer_index'] < len(st.session_state['influencer_list']):
             st.session_state.last_status = f"Messages sent to `{influencer_id}`. Moving to next influencer..."
