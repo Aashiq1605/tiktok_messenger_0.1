@@ -1,10 +1,17 @@
 import streamlit as st
+import pandas as pd
+from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+import google.auth
 import os
+import json
+import base64
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 import re
-import tempfile
-from datetime import datetime
+import tempfile 
 import time
-import json # We will need this to parse the JSON cookies
 
 # Selenium imports
 from selenium import webdriver
@@ -13,7 +20,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException, InvalidArgumentException
-from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.keys import Keys 
 
 # --- Selenium Driver Management for Streamlit Cloud ---
 if 'driver' not in st.session_state:
@@ -42,7 +49,7 @@ def get_selenium_driver():
             st.success("✅ Successfully initialized headless Chrome driver!")
         except WebDriverException as e:
             st.error(f"❌ Failed to initialize Chrome driver: {e}")
-            st.warning("This application is not designed for local use as-is. It is configured to run on Streamlit Cloud.")
+            st.warning("This application is configured to run on Streamlit Cloud. It will not launch a visible browser on your local machine.")
             st.session_state.driver = None
             st.stop()
     return st.session_state.driver
@@ -64,15 +71,10 @@ def apply_cookies(driver, cookies_json):
         cookies = json.loads(cookies_json)
         driver.delete_all_cookies()
         for cookie in cookies:
-            # The 'domain' key can sometimes cause issues.
-            # Removing it can make the cookie work across different subdomains.
             if 'domain' in cookie:
                 del cookie['domain']
-            
-            # The 'sameSite' key is not a valid key for cookie injection in Selenium
             if 'sameSite' in cookie:
                 del cookie['sameSite']
-
             driver.add_cookie(cookie)
         return True
     except Exception as e:
@@ -81,30 +83,144 @@ def apply_cookies(driver, cookies_json):
 
 # --- Streamlit UI Configuration ---
 st.set_page_config(
-    page_title="TikTok Affiliate Messenger",
+    page_title="Instagram Affiliate Messenger",
     page_icon="💬",
     layout="centered"
 )
 
-st.title("💬 TikTok Affiliate Messenger")
-st.markdown("Automate TikTok Affiliate messaging.")
+# Load environment variables from .env file (for Google Auth)
+load_dotenv()
+try:
+    GOOGLE_CLIENT_ID = st.secrets["GOOGLE_CLIENT_ID"]
+    GOOGLE_CLIENT_SECRET = st.secrets["GOOGLE_CLIENT_SECRET"]
+except KeyError:
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+CLIENT_SECRETS_FILE = {
+    "web": {
+        "client_id": GOOGLE_CLIENT_ID,
+        "project_id": "instagram-affiliate-messenger",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uris": ["http://localhost:8501"],
+        "javascript_origins": ["http://localhost:8501"]
+    }
+}
+if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+    st.error("Google Client ID or Secret not found. Please set them in your secrets.toml or .env file.")
+    st.stop()
+
+# --- Helper Functions for Google Sheets ---
+def get_google_credentials():
+    creds = None
+    if 'credentials' in st.session_state:
+        creds = st.session_state['credentials']
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                st.error(f"Error refreshing token: {e}")
+                creds = None
+        else:
+            flow = Flow.from_client_config(
+                CLIENT_SECRETS_FILE, SCOPES, redirect_uri='http://localhost:8501'
+            )
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            st.session_state['auth_url'] = auth_url
+            st.warning("Click the button below to authenticate with Google.")
+            st.link_button("Authenticate with Google", url=auth_url)
+
+            auth_code = st.query_params.get("code")
+            if auth_code:
+                try:
+                    flow.fetch_token(code=auth_code)
+                    creds = flow.credentials
+                    st.session_state['credentials'] = creds
+                    st.success("Authentication successful!")
+                    st.query_params.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Authentication failed: {e}")
+                    del st.session_state['auth_url']
+                    st.query_params.clear()
+                    return None
+            else:
+                return None
+    return creds
+
+@st.cache_data(ttl=3600)
+def fetch_sheet_names(sheet_id, _creds):
+    try:
+        service = google.auth.transport.requests.AuthorizedSession(_creds)
+        response = service.get(f'https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?fields=sheets.properties.title')
+        response.raise_for_status()
+        data = response.json()
+        sheet_titles = [s['properties']['title'] for s in data.get('sheets', [])]
+        return sheet_titles
+    except Exception as e:
+        st.error(f"Error fetching sheet names: {e}")
+        return []
+
+@st.cache_data(ttl=60)
+def read_sheet_data(sheet_id, sheet_name, _creds):
+    try:
+        service = google.auth.transport.requests.AuthorizedSession(_creds)
+        response = service.get(f'https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{sheet_name}')
+        response.raise_for_status()
+        data = response.json()
+        values = data.get('values', [])
+        return values
+    except Exception as e:
+        st.error(f"Error reading sheet data: {e}")
+        return []
+
+def update_sheet_data(sheet_id, sheet_name, row_number, data_to_write, creds):
+    try:
+        service = google.auth.transport.requests.AuthorizedSession(creds)
+        range_to_update = f"{sheet_name}!H{row_number}:K{row_number}" 
+        body = {"values": [data_to_write]}
+        response = service.put(
+            f'https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_to_update}?valueInputOption=RAW',
+            json=body
+        )
+        response.raise_for_status()
+        st.success(f"Sheet updated successfully for row {row_number}.")
+        return True
+    except Exception as e:
+        st.error(f"Error updating sheet: {e}")
+        return False
+
+# --- App UI Layout ---
+st.title("💬 Instagram Affiliate Messenger")
+st.markdown("Automate Instagram messaging.")
+
+st.info("Since this app is running in a headless browser, you must provide your login session cookies to authenticate.")
 
 # --- Cookie Management Section ---
-st.subheader("Login Session Management")
-st.info("Since this app is running in a headless browser, you must provide your login session cookies to authenticate.")
 cookie_data = st.text_area(
-    "Paste your TikTok Seller Center cookies (JSON format)",
+    "Paste your Instagram cookies (JSON format)",
     height=250,
-    help="1. Log in to TikTok Seller Center in your browser.\n2. Use a browser extension (like 'EditThisCookie') to export your session cookies as JSON.\n3. Paste the full JSON string here."
+    help="1. Log in to Instagram in your browser.\n2. Use a browser extension (like 'EditThisCookie') to export your session cookies as JSON.\n3. Paste the full JSON string here."
 )
 
-if st.button("Close Automated Browser Session", help="Closes the Selenium connection to the browser."):
+if st.button("Close Automated Browser Session", help="Closes the Selenium connection."):
     close_selenium_driver()
-
-# TikTok Store ID Input
-store_id = st.text_input("TikTok Store ID", key="store_id", help="Enter your TikTok Shop ID. This is typically found in your TikTok Seller Center URL.")
-
+    
 st.markdown("---")
+
+# --- Multiple Influencer ID Input ---
+st.subheader("Influencers to Message")
+influencer_ids_input = st.text_area(
+    "Enter Influencer IDs (one per line)",
+    height=200,
+    placeholder="e.g.,\n1234567890\n9876543210\n..."
+)
 
 # --- Multiple Custom Messages Input ---
 st.subheader("Messages to Send")
@@ -124,7 +240,7 @@ with col_msg_buttons[1]:
         st.session_state.custom_messages.pop()
         st.rerun()
 
-# --- Image Upload Input ---
+# --- Image Upload Input (Modified for multiple files) ---
 st.subheader("Images to Attach (Optional)")
 uploaded_files = st.file_uploader("Upload images", type=["png", "jpg", "jpeg", "gif"], accept_multiple_files=True, key="images_upload")
 
@@ -140,7 +256,7 @@ if uploaded_files:
             sanitized_filename = re.sub(r'[^\w\s.-]', '', uploaded_file.name).strip()
             if not sanitized_filename:
                 sanitized_filename = f"uploaded_image_{datetime.now().strftime('%Y%m%d%H%M%S')}_{i}.tmp"
-
+            
             temp_file_path = os.path.join(temp_dir, sanitized_filename)
 
             with open(temp_file_path, "wb") as f:
@@ -154,139 +270,181 @@ if uploaded_files:
 else:
     st.session_state['uploaded_image_paths'] = []
 
+# --- Automation State Management ---
+if 'influencer_list' not in st.session_state:
+    st.session_state['influencer_list'] = []
+if 'current_influencer_index' not in st.session_state:
+    st.session_state['current_influencer_index'] = 0
+if 'automation_running' not in st.session_state:
+    st.session_state['automation_running'] = False
+if 'last_status' not in st.session_state:
+    st.session_state['last_status'] = "Ready to start automation. Please configure the inputs and click 'Start Messaging Session'."
+
 st.markdown("---")
 
-# --- Manual Chat Automation ---
-st.subheader("Send Message to Creator")
-creator_id = st.text_input("Creator ID (CID)", help="Paste the 'cid' from the TikTok Affiliate link here.")
-
+# --- Automation Control Buttons ---
 col1, col2 = st.columns(2)
-
-with col1:
-    send_button_disabled = not creator_id.strip() or (not st.session_state.custom_messages and not st.session_state.uploaded_image_paths) or not cookie_data.strip()
-    send_button = st.button("Send Message", type="primary", key="send_btn", use_container_width=True, disabled=send_button_disabled)
-
 status_message_placeholder = st.empty()
 
+with col1:
+    start_button_disabled = st.session_state.automation_running
+    start_button = st.button("Start Messaging Session", type="primary", key="start_btn", use_container_width=True, disabled=start_button_disabled)
 
-if send_button:
+with col2:
+    stop_button_disabled = not st.session_state.automation_running
+    stop_button = st.button("Stop Automation", type="secondary", key="stop_btn", use_container_width=True, disabled=stop_button_disabled)
+
+if stop_button: 
+    st.session_state.automation_running = False
+    st.session_state.last_status = "Automation stopped by user. Click 'Start Messaging Session' to resume."
+    status_message_placeholder.info(st.session_state.last_status)
+
+if start_button:
+    influencer_ids = [i.strip() for i in influencer_ids_input.split('\n') if i.strip()]
+    messages_to_send = [msg.strip() for msg in st.session_state.custom_messages if msg.strip()]
+    images_to_send = st.session_state.get('uploaded_image_paths', [])
+
+    if not influencer_ids:
+        st.session_state.last_status = "Please enter at least one Influencer ID."
+        status_message_placeholder.error(st.session_state.last_status)
+        st.session_state.automation_running = False
+    elif not messages_to_send and not images_to_send:
+        st.session_state.last_status = "Please enter at least one message OR upload at least one image to send."
+        status_message_placeholder.error(st.session_state.last_status)
+        st.session_state.automation_running = False
+    elif not cookie_data.strip():
+        st.session_state.last_status = "Please provide your Instagram login cookies."
+        status_message_placeholder.error(st.session_state.last_status)
+        st.session_state.automation_running = False
+    else:
+        st.session_state.automation_running = True
+        st.session_state['influencer_list'] = influencer_ids
+        st.session_state['current_influencer_index'] = 0
+        st.rerun()
+
+# --- Automation Loop Logic ---
+if st.session_state.automation_running and st.session_state.get('influencer_list') and \
+   st.session_state['current_influencer_index'] < len(st.session_state['influencer_list']):
+
+    influencer_id = st.session_state['influencer_list'][st.session_state['current_influencer_index']]
     messages_to_send = [msg.strip() for msg in st.session_state.custom_messages if msg.strip()]
     image_paths_to_send = st.session_state.get('uploaded_image_paths', [])
-
-    if not messages_to_send and not image_paths_to_send:
-        status_message_placeholder.error("Please enter at least one message or upload at least one image to send.")
-        st.stop()
     
-    if not creator_id.strip():
-        status_message_placeholder.error("Please enter a Creator ID.")
-        st.stop()
+    st.markdown(f"---")
+    st.subheader(f"Automating for Influencer: `{influencer_id}`")
     
-    if not store_id.strip():
-        status_message_placeholder.error("Please enter your TikTok Store ID.")
-        st.stop()
-    
-    if not cookie_data.strip():
-        status_message_placeholder.error("Please provide your login session cookies.")
-        st.stop()
-
-    status_message_placeholder.info(f"Connecting to browser and preparing to send message to creator '{creator_id}'...")
-
     driver = get_selenium_driver()
     if not driver:
-        status_message_placeholder.error("Browser driver is not active. The app cannot proceed without a working Selenium connection.")
+        st.session_state.automation_running = False
         st.stop()
     
-    # --- CRITICAL: Apply cookies before navigation ---
-    # We must first navigate to the site's base URL to set the cookies correctly.
-    base_url = "https://seller.tiktokglobalshop.com"
+    # Base URL to apply cookies to before navigation
+    base_url = "https://www.instagram.com/"
     driver.get(base_url)
     
     if not apply_cookies(driver, cookie_data):
-        st.warning("Failed to apply cookies. The session may not be authenticated.")
+        st.warning("Failed to apply cookies. Please ensure they are valid and try again.")
+        st.session_state.automation_running = False
         st.stop()
     
-    # Now navigate to the target URL
-    chat_url = f"https://affiliate.tiktok.com/seller/im?shop_id={store_id}&creator_id={creator_id}&enter_from=affiliate_creator_details&shop_region=TH"
-    status_message_placeholder.info(f"Navigating to chat for creator '{creator_id}'...")
+    chat_url = f"https://www.instagram.com/direct/t/{influencer_id}/"
+    st.session_state.last_status = f"Navigating to chat for influencer `{influencer_id}`..."
+    status_message_placeholder.info(st.session_state.last_status)
 
     try:
         driver.get(chat_url)
-        message_input_selector = 'textarea[placeholder*="Send a message"]'
         
-        # We need a longer timeout here because of the initial page load and login check
-        WebDriverWait(driver, 60).until(
+        # --- Using a robust selector for the message input box ---
+        # AVOID DYNAMIC CLASS NAMES LIKE 'x1n2onr6'
+        # A more stable approach is to find the <textarea> element with a specific placeholder or role.
+        message_input_selector = 'textarea[placeholder*="Message..."]'
+        
+        WebDriverWait(driver, 40).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, message_input_selector))
         )
         message_textarea = driver.find_element(By.CSS_SELECTOR, message_input_selector)
 
+        # Send all text messages first
         for i, msg_content in enumerate(messages_to_send):
-            if not msg_content.strip():
-                continue
-
             message_textarea.clear()
             message_textarea.send_keys(msg_content)
             
-            status_message_placeholder.success(f"Message {i+1} pasted. Sending...")
+            st.session_state.last_status = f"Pasting message {i+1} for `{influencer_id}`. Sending..."
+            status_message_placeholder.success(st.session_state.last_status)
+            
             time.sleep(1)
             message_textarea.send_keys(Keys.ENTER)
-            status_message_placeholder.success(f"Message {i+1} sent successfully.")
-            time.sleep(2)
+            
+            st.session_state.last_status = f"Message {i+1} sent successfully."
+            status_message_placeholder.success(st.session_state.last_status)
+            
+            time.sleep(2) # Delay between messages
 
+        # Image upload logic (Instagram-specific)
         if image_paths_to_send:
-            status_message_placeholder.info(f"Attempting to upload {len(image_paths_to_send)} image(s)...")
+            st.warning("Warning: Image upload on Instagram is highly prone to failure. Use with caution.")
+            st.session_state.last_status = f"Attempting to upload {len(image_paths_to_send)} image(s)..."
+            status_message_placeholder.info(st.session_state.last_status)
             try:
+                # Instagram's file input can be tricky. This selector may change.
+                file_input_selector = 'input[accept*="image/jpeg,image/png,image/heic,image/heif,video/mp4,video/quicktime"]'
                 file_input_element = WebDriverWait(driver, 10).until(
-                    EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="file"]'))
+                    EC.presence_of_element_located((By.CSS_SELECTOR, file_input_selector))
                 )
+                
+                # Join paths for multiple file upload
                 all_image_paths_string = "\n".join(image_paths_to_send)
                 file_input_element.send_keys(all_image_paths_string)
                 
-                status_message_placeholder.success("Image(s) sent to upload input. Waiting for TikTok to process...")
-                time.sleep(5)
-                
-                dialog_selector = 'div.arco-modal[role="dialog"]'
-                ok_button_selector = 'button.arco-btn.arco-btn-primary.arco-btn-size-large.arco-btn-shape-square'
-                try:
-                    WebDriverWait(driver, 5).until(
-                        EC.visibility_of_element_located((By.CSS_SELECTOR, dialog_selector))
-                    )
-                    status_message_placeholder.info("Image confirmation dialog detected. Clicking OK...")
-                    ok_button = WebDriverWait(driver, 5).until(
-                        EC.element_to_be_clickable((By.CSS_SELECTOR, ok_button_selector))
-                    )
-                    ok_button.click()
-                    status_message_placeholder.success("Clicked OK on image dialog.")
-                    time.sleep(2)
-                except TimeoutException:
-                    status_message_placeholder.info("No image confirmation dialog appeared. Proceeding.")
-                except Exception as e:
-                    status_message_placeholder.error(f"Error interacting with image confirmation dialog: {e}. Proceeding.")
-            
-            except TimeoutException:
-                status_message_placeholder.warning("Timeout: Image upload element not found. Automation proceeding without image upload.")
-            except NoSuchElementException:
-                status_message_placeholder.warning("Image upload element not found. Automation proceeding without image upload.")
+                st.session_state.last_status = "Image(s) sent to upload input. Waiting for Instagram to process..."
+                status_message_placeholder.success(st.session_state.last_status)
+                time.sleep(10) # Longer delay for upload and processing
             except Exception as e:
-                status_message_placeholder.error(f"Error during image upload: {e}. Automation proceeding without image upload.")
+                st.session_state.last_status = f"Error during image upload: {e}. Proceeding without image for this influencer."
+                status_message_placeholder.error(st.session_state.last_status)
             finally:
                 for temp_path in image_paths_to_send:
                     if os.path.exists(temp_path):
-                        try:
-                            os.remove(temp_path)
-                            st.info(f"Cleaned up temporary image file: {temp_path}")
-                        except Exception as e:
-                            st.warning(f"Could not remove temporary image file {temp_path}: {e}")
+                        os.remove(temp_path)
                 st.session_state['uploaded_image_paths'] = []
 
-        status_message_placeholder.success("All messages and images sent successfully!")
-        st.balloons()
-    
+        # --- Move to Next Influencer ---
+        st.session_state['current_influencer_index'] += 1
+        time.sleep(5) # Delay before moving to the next chat to avoid rate limits
+        
+        if st.session_state.automation_running and st.session_state['current_influencer_index'] < len(st.session_state['influencer_list']):
+            st.session_state.last_status = f"Messages sent to `{influencer_id}`. Moving to next influencer..."
+            status_message_placeholder.info(st.session_state.last_status)
+            st.rerun()
+        else:
+            st.session_state.last_status = "All influencers processed. Automation finished."
+            status_message_placeholder.success(st.session_state.last_status)
+            st.session_state.automation_running = False
+            st.session_state['influencer_list'] = []
+            st.session_state['current_influencer_index'] = 0
+
     except TimeoutException:
-        status_message_placeholder.error(f"Timeout: A required element was not found within the time limit.")
+        st.session_state.last_status = f"Timeout for `{influencer_id}`. Could not find a required element. Moving to next influencer."
+        status_message_placeholder.warning(st.session_state.last_status)
+        st.session_state['current_influencer_index'] += 1
+        st.rerun()
     except NoSuchElementException as e:
-        status_message_placeholder.error(f"Element not found: {e}. TikTok UI might have changed.")
+        st.session_state.last_status = f"Element not found for `{influencer_id}`: {e}. Instagram's UI might have changed. Moving to next influencer."
+        status_message_placeholder.warning(st.session_state.last_status)
+        st.session_state['current_influencer_index'] += 1
+        st.rerun()
     except WebDriverException as e:
-        status_message_placeholder.error(f"Browser error: {e}. The connection to the automated browser might have been lost.")
+        st.session_state.last_status = f"Browser error during automation for `{influencer_id}`: {e}. The connection might have been lost. Automation stopped."
+        status_message_placeholder.error(st.session_state.last_status)
         close_selenium_driver()
+        st.session_state.automation_running = False
     except Exception as e:
-        status_message_placeholder.error(f"An unexpected error occurred: {e}.")
+        st.session_state.last_status = f"An unexpected error occurred for `{influencer_id}`: {e}. Automation stopped."
+        status_message_placeholder.error(st.session_state.last_status)
+        st.session_state.automation_running = False
+    
+    if not st.session_state.automation_running:
+        st.stop()
+
+else:
+    status_message_placeholder.info(st.session_state.last_status)
