@@ -1,9 +1,10 @@
 import streamlit as st
-import pandas as pd
 import os
 import re
 import tempfile
-from datetime import datetime, timedelta
+from datetime import datetime
+import time
+import json # We will need this to parse the JSON cookies
 
 # Selenium imports
 from selenium import webdriver
@@ -11,54 +12,39 @@ from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException
+from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException, InvalidArgumentException
 from selenium.webdriver.common.keys import Keys
-import time
-import subprocess
 
-# --- Chrome Debug Mode Config ---
-USER_DATA_DIR = os.path.expanduser("~/chrome_debug_profile")
-REMOTE_DEBUG_PORT = "9222"
+# --- Selenium Driver Management for Streamlit Cloud ---
+if 'driver' not in st.session_state:
+    st.session_state.driver = None
 
-def launch_chrome_instance(chrome_path: str, store_id: str):
-    """Launch Chrome in remote debugging mode automatically and open TikTok Seller for given store."""
-    if not os.path.exists(chrome_path):
-        st.error(f"❌ The specified Chrome path does not exist: '{chrome_path}'")
-        return
-
-    tiktok_url = f"https://seller.tiktokglobalshop.com/account/login?shop_id={store_id}"
-
-    cmd = [
-        chrome_path,
-        f"--remote-debugging-port={REMOTE_DEBUG_PORT}",
-        f"--user-data-dir={USER_DATA_DIR}",
-        "--no-first-run",
-        "--no-default-browser-check",
-        tiktok_url
-    ]
-    
-    try:
-        subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        st.success(f"✅ Chrome launched in debug mode and opened TikTok Seller for store ID {store_id}. Please ensure you are logged in.")
-        st.warning("Note: This feature only works on your local machine and will not launch a visible browser on Streamlit Cloud.")
-    except Exception as e:
-        st.error(f"❌ An error occurred while trying to launch Chrome: {e}")
-
-def get_selenium_driver(chrome_path: str):
-    """Attach to the Chrome instance launched by this app."""
+def get_selenium_driver():
+    """
+    Initializes and returns a headless Selenium WebDriver.
+    This function is tailored for Streamlit Cloud deployment.
+    """
     if st.session_state.driver is None:
         try:
             options = webdriver.ChromeOptions()
-            options.add_experimental_option("debuggerAddress", f"127.0.0.1:{REMOTE_DEBUG_PORT}")
+            options.add_argument("--headless")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--log-level=3")
             
-            # Use the provided chrome_path if it exists to build the Service object
-            service = Service(executable_path=chrome_path)
+            # This is the path for Chromium installed via packages.txt
+            service = Service(executable_path='/usr/bin/chromium-driver')
+
             driver = webdriver.Chrome(service=service, options=options)
             st.session_state.driver = driver
-            st.success("✅ Successfully attached to Chrome instance!")
+            st.success("✅ Successfully initialized headless Chrome driver!")
         except WebDriverException as e:
-            st.error(f"❌ Failed to connect to Chrome: {e}")
+            st.error(f"❌ Failed to initialize Chrome driver: {e}")
+            st.warning("This application is not designed for local use as-is. It is configured to run on Streamlit Cloud.")
             st.session_state.driver = None
+            st.stop()
     return st.session_state.driver
 
 def close_selenium_driver():
@@ -70,6 +56,30 @@ def close_selenium_driver():
         st.session_state.driver = None
         st.info("Automated browser session closed.")
 
+def apply_cookies(driver, cookies_json):
+    """
+    Deletes existing cookies and applies new ones from a JSON string.
+    """
+    try:
+        cookies = json.loads(cookies_json)
+        driver.delete_all_cookies()
+        for cookie in cookies:
+            # The 'domain' key can sometimes cause issues.
+            # Removing it can make the cookie work across different subdomains.
+            if 'domain' in cookie:
+                del cookie['domain']
+            
+            # The 'sameSite' key is not a valid key for cookie injection in Selenium
+            if 'sameSite' in cookie:
+                del cookie['sameSite']
+
+            driver.add_cookie(cookie)
+        return True
+    except Exception as e:
+        st.error(f"❌ Failed to apply cookies: {e}")
+        return False
+
+# --- Streamlit UI Configuration ---
 st.set_page_config(
     page_title="TikTok Affiliate Messenger",
     page_icon="💬",
@@ -79,26 +89,20 @@ st.set_page_config(
 st.title("💬 TikTok Affiliate Messenger")
 st.markdown("Automate TikTok Affiliate messaging.")
 
-# --- UI for Chrome Path and Store ID ---
-st.subheader("Configuration")
-chrome_path = st.text_input(
-    "Path to Chrome Executable",
-    value="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", # Default value for Mac
-    help="Enter the full path to your Google Chrome executable. Examples: Windows: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe, Linux: /usr/bin/google-chrome-stable"
+# --- Cookie Management Section ---
+st.subheader("Login Session Management")
+st.info("Since this app is running in a headless browser, you must provide your login session cookies to authenticate.")
+cookie_data = st.text_area(
+    "Paste your TikTok Seller Center cookies (JSON format)",
+    height=250,
+    help="1. Log in to TikTok Seller Center in your browser.\n2. Use a browser extension (like 'EditThisCookie') to export your session cookies as JSON.\n3. Paste the full JSON string here."
 )
 
-store_id = st.text_input("TikTok Store ID", key="store_id", help="Enter your TikTok Shop ID. This is typically found in your TikTok Seller Center URL.")
-
-### button to launch chrome with tiktok
-if st.button("Launch Chrome Instance (Local Only)", help="Start Chrome in debug mode and open TikTok Seller. This function is for local use only."):
-    if store_id.strip() and chrome_path.strip():
-        launch_chrome_instance(chrome_path, store_id)
-    else:
-        st.error("⚠️ Please enter a valid Chrome path and TikTok Store ID.")
-
-# Button to manually close the browser connection
-if st.button("Close Automated Browser Session", help="Closes the Selenium connection to the browser. The browser window itself will remain open if it was launched manually."):
+if st.button("Close Automated Browser Session", help="Closes the Selenium connection to the browser."):
     close_selenium_driver()
+
+# TikTok Store ID Input
+store_id = st.text_input("TikTok Store ID", key="store_id", help="Enter your TikTok Shop ID. This is typically found in your TikTok Seller Center URL.")
 
 st.markdown("---")
 
@@ -159,11 +163,11 @@ creator_id = st.text_input("Creator ID (CID)", help="Paste the 'cid' from the Ti
 col1, col2 = st.columns(2)
 
 with col1:
-    send_button_disabled = not creator_id.strip() or (not st.session_state.custom_messages and not st.session_state.uploaded_image_paths) or not chrome_path.strip()
+    send_button_disabled = not creator_id.strip() or (not st.session_state.custom_messages and not st.session_state.uploaded_image_paths) or not cookie_data.strip()
     send_button = st.button("Send Message", type="primary", key="send_btn", use_container_width=True, disabled=send_button_disabled)
 
-# Placeholder for dynamic status messages
 status_message_placeholder = st.empty()
+
 
 if send_button:
     messages_to_send = [msg.strip() for msg in st.session_state.custom_messages if msg.strip()]
@@ -181,17 +185,27 @@ if send_button:
         status_message_placeholder.error("Please enter your TikTok Store ID.")
         st.stop()
     
-    if not chrome_path.strip():
-        status_message_placeholder.error("Please provide a valid path to your Chrome executable.")
+    if not cookie_data.strip():
+        status_message_placeholder.error("Please provide your login session cookies.")
         st.stop()
 
     status_message_placeholder.info(f"Connecting to browser and preparing to send message to creator '{creator_id}'...")
 
-    driver = get_selenium_driver(chrome_path)
+    driver = get_selenium_driver()
     if not driver:
-        status_message_placeholder.error("Browser driver is not active. Please ensure Chrome is launched in debug mode.")
+        status_message_placeholder.error("Browser driver is not active. The app cannot proceed without a working Selenium connection.")
         st.stop()
-
+    
+    # --- CRITICAL: Apply cookies before navigation ---
+    # We must first navigate to the site's base URL to set the cookies correctly.
+    base_url = "https://seller.tiktokglobalshop.com"
+    driver.get(base_url)
+    
+    if not apply_cookies(driver, cookie_data):
+        st.warning("Failed to apply cookies. The session may not be authenticated.")
+        st.stop()
+    
+    # Now navigate to the target URL
     chat_url = f"https://affiliate.tiktok.com/seller/im?shop_id={store_id}&creator_id={creator_id}&enter_from=affiliate_creator_details&shop_region=TH"
     status_message_placeholder.info(f"Navigating to chat for creator '{creator_id}'...")
 
@@ -199,7 +213,8 @@ if send_button:
         driver.get(chat_url)
         message_input_selector = 'textarea[placeholder*="Send a message"]'
         
-        WebDriverWait(driver, 30).until(
+        # We need a longer timeout here because of the initial page load and login check
+        WebDriverWait(driver, 60).until(
             EC.presence_of_element_located((By.CSS_SELECTOR, message_input_selector))
         )
         message_textarea = driver.find_element(By.CSS_SELECTOR, message_input_selector)
@@ -271,7 +286,7 @@ if send_button:
     except NoSuchElementException as e:
         status_message_placeholder.error(f"Element not found: {e}. TikTok UI might have changed.")
     except WebDriverException as e:
-        status_message_placeholder.error(f"Browser error: {e}. The connection to the automated browser might have been lost. Please ensure Chrome is still open.")
+        status_message_placeholder.error(f"Browser error: {e}. The connection to the automated browser might have been lost.")
         close_selenium_driver()
     except Exception as e:
         status_message_placeholder.error(f"An unexpected error occurred: {e}.")
