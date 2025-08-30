@@ -1,8 +1,4 @@
- streamlit 
- pandas 
- google-auth 
- google-auth-oauthlib 
- google-auth-httplib2 
- selenium 
- python-dotenv
-
+streamlit
+selenium
+google-auth-oauthlib
+google-auth
