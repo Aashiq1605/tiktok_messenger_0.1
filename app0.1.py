@@ -446,4 +446,3 @@ if st.session_state.automation_running and st.session_state.get('influencer_list
 
 else:
     status_message_placeholder.info(st.session_state.last_status)
-"
