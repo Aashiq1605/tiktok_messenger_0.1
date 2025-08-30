@@ -17,28 +17,19 @@ import time
 import subprocess
 
 # --- Chrome Debug Mode Config ---
-# On a Mac, the path to Chrome is /Applications/Google Chrome.app/Contents/MacOS/Google Chrome
-# On Linux, it's typically /usr/bin/google-chrome-stable
-# On Windows, it can be C:\Program Files\Google\Chrome\Application\chrome.exe
-# IMPORTANT: This path must be correct for the OS where you run the app.
-# The `launch_chrome_instance` function will not work on Streamlit Cloud.
-CHROME_PATH = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
 USER_DATA_DIR = os.path.expanduser("~/chrome_debug_profile")
 REMOTE_DEBUG_PORT = "9222"
 
-def launch_chrome_instance(store_id: str):
+def launch_chrome_instance(chrome_path: str, store_id: str):
     """Launch Chrome in remote debugging mode automatically and open TikTok Seller for given store."""
-    # This function is intended for local development only.
-    # It will not work on Streamlit Cloud as there is no user-facing browser.
-    
-    # We'll remove the `pkill` command to prevent errors on systems where it's not installed.
-    # You can manually kill any existing instances before running if needed.
-    # The `subprocess.Popen` call might fail silently or raise an error on some systems.
-    
+    if not os.path.exists(chrome_path):
+        st.error(f"❌ The specified Chrome path does not exist: '{chrome_path}'")
+        return
+
     tiktok_url = f"https://seller.tiktokglobalshop.com/account/login?shop_id={store_id}"
 
     cmd = [
-        CHROME_PATH,
+        chrome_path,
         f"--remote-debugging-port={REMOTE_DEBUG_PORT}",
         f"--user-data-dir={USER_DATA_DIR}",
         "--no-first-run",
@@ -50,31 +41,18 @@ def launch_chrome_instance(store_id: str):
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         st.success(f"✅ Chrome launched in debug mode and opened TikTok Seller for store ID {store_id}. Please ensure you are logged in.")
         st.warning("Note: This feature only works on your local machine and will not launch a visible browser on Streamlit Cloud.")
-    except FileNotFoundError:
-        st.error(f"❌ Could not find Chrome executable at '{CHROME_PATH}'. Please check the path and try again.")
     except Exception as e:
         st.error(f"❌ An error occurred while trying to launch Chrome: {e}")
 
-
-# --- Streamlit UI Configuration ---
-st.set_page_config(
-    page_title="TikTok Affiliate Messenger",
-    page_icon="💬",
-    layout="centered"
-)
-
-
-# --- Global Selenium Driver Management ---
-if 'driver' not in st.session_state:
-    st.session_state.driver = None
-
-def get_selenium_driver():
+def get_selenium_driver(chrome_path: str):
     """Attach to the Chrome instance launched by this app."""
     if st.session_state.driver is None:
         try:
             options = webdriver.ChromeOptions()
             options.add_experimental_option("debuggerAddress", f"127.0.0.1:{REMOTE_DEBUG_PORT}")
-            service = Service()
+            
+            # Use the provided chrome_path if it exists to build the Service object
+            service = Service(executable_path=chrome_path)
             driver = webdriver.Chrome(service=service, options=options)
             st.session_state.driver = driver
             st.success("✅ Successfully attached to Chrome instance!")
@@ -82,7 +60,6 @@ def get_selenium_driver():
             st.error(f"❌ Failed to connect to Chrome: {e}")
             st.session_state.driver = None
     return st.session_state.driver
-
 
 def close_selenium_driver():
     """
@@ -93,26 +70,37 @@ def close_selenium_driver():
         st.session_state.driver = None
         st.info("Automated browser session closed.")
 
-# Button to manually close the browser connection
-if st.button("Close Automated Browser Session", help="Closes the Selenium connection to the browser. The browser window itself will remain open if it was launched manually."):
-    close_selenium_driver()
-
-# --- Streamlit App UI Layout ---
+st.set_page_config(
+    page_title="TikTok Affiliate Messenger",
+    page_icon="💬",
+    layout="centered"
+)
 
 st.title("💬 TikTok Affiliate Messenger")
 st.markdown("Automate TikTok Affiliate messaging.")
 
-# TikTok Store ID Input
+# --- UI for Chrome Path and Store ID ---
+st.subheader("Configuration")
+chrome_path = st.text_input(
+    "Path to Chrome Executable",
+    value="/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", # Default value for Mac
+    help="Enter the full path to your Google Chrome executable. Examples: Windows: C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe, Linux: /usr/bin/google-chrome-stable"
+)
+
 store_id = st.text_input("TikTok Store ID", key="store_id", help="Enter your TikTok Shop ID. This is typically found in your TikTok Seller Center URL.")
-if not store_id:
-    st.warning("Please enter your TikTok Store ID.")
 
 ### button to launch chrome with tiktok
-if st.button("Launch Chrome Instance (Local Only)", help="Start Chrome in debug mode automatically and open TikTok Seller. This function is only for local use."):
-    if store_id.strip():
-        launch_chrome_instance(store_id)
+if st.button("Launch Chrome Instance (Local Only)", help="Start Chrome in debug mode and open TikTok Seller. This function is for local use only."):
+    if store_id.strip() and chrome_path.strip():
+        launch_chrome_instance(chrome_path, store_id)
     else:
-        st.error("⚠️ Please enter your TikTok Store ID first.")
+        st.error("⚠️ Please enter a valid Chrome path and TikTok Store ID.")
+
+# Button to manually close the browser connection
+if st.button("Close Automated Browser Session", help="Closes the Selenium connection to the browser. The browser window itself will remain open if it was launched manually."):
+    close_selenium_driver()
+
+st.markdown("---")
 
 # --- Multiple Custom Messages Input ---
 st.subheader("Messages to Send")
@@ -171,15 +159,13 @@ creator_id = st.text_input("Creator ID (CID)", help="Paste the 'cid' from the Ti
 col1, col2 = st.columns(2)
 
 with col1:
-    send_button_disabled = not creator_id.strip() or (not st.session_state.custom_messages and not st.session_state.uploaded_image_paths)
+    send_button_disabled = not creator_id.strip() or (not st.session_state.custom_messages and not st.session_state.uploaded_image_paths) or not chrome_path.strip()
     send_button = st.button("Send Message", type="primary", key="send_btn", use_container_width=True, disabled=send_button_disabled)
 
 # Placeholder for dynamic status messages
 status_message_placeholder = st.empty()
 
-
 if send_button:
-    # Get messages and image paths from session state
     messages_to_send = [msg.strip() for msg in st.session_state.custom_messages if msg.strip()]
     image_paths_to_send = st.session_state.get('uploaded_image_paths', [])
 
@@ -194,10 +180,14 @@ if send_button:
     if not store_id.strip():
         status_message_placeholder.error("Please enter your TikTok Store ID.")
         st.stop()
+    
+    if not chrome_path.strip():
+        status_message_placeholder.error("Please provide a valid path to your Chrome executable.")
+        st.stop()
 
     status_message_placeholder.info(f"Connecting to browser and preparing to send message to creator '{creator_id}'...")
 
-    driver = get_selenium_driver()
+    driver = get_selenium_driver(chrome_path)
     if not driver:
         status_message_placeholder.error("Browser driver is not active. Please ensure Chrome is launched in debug mode.")
         st.stop()
@@ -207,7 +197,6 @@ if send_button:
 
     try:
         driver.get(chat_url)
-
         message_input_selector = 'textarea[placeholder*="Send a message"]'
         
         WebDriverWait(driver, 30).until(
@@ -215,7 +204,6 @@ if send_button:
         )
         message_textarea = driver.find_element(By.CSS_SELECTOR, message_input_selector)
 
-        # Send all messages first
         for i, msg_content in enumerate(messages_to_send):
             if not msg_content.strip():
                 continue
@@ -224,31 +212,23 @@ if send_button:
             message_textarea.send_keys(msg_content)
             
             status_message_placeholder.success(f"Message {i+1} pasted. Sending...")
-            
             time.sleep(1)
             message_textarea.send_keys(Keys.ENTER)
-            
             status_message_placeholder.success(f"Message {i+1} sent successfully.")
-            
             time.sleep(2)
 
-        # Send images last
         if image_paths_to_send:
             status_message_placeholder.info(f"Attempting to upload {len(image_paths_to_send)} image(s)...")
             try:
-                # Find the hidden file input element
                 file_input_element = WebDriverWait(driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, 'input[type="file"]'))
                 )
-                
                 all_image_paths_string = "\n".join(image_paths_to_send)
-                
                 file_input_element.send_keys(all_image_paths_string)
                 
                 status_message_placeholder.success("Image(s) sent to upload input. Waiting for TikTok to process...")
-                time.sleep(5) # Delay to allow image upload
-
-                # Optional: Handle pop-up dialog after image upload
+                time.sleep(5)
+                
                 dialog_selector = 'div.arco-modal[role="dialog"]'
                 ok_button_selector = 'button.arco-btn.arco-btn-primary.arco-btn-size-large.arco-btn-shape-square'
                 try:
