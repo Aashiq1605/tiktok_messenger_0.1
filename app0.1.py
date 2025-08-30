@@ -1,10 +1,17 @@
 import streamlit as st
+import pandas as pd
+from google_auth_oauthlib.flow import Flow
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+import google.auth
 import os
 import json
+import base64
+from datetime import datetime, timedelta
+from dotenv import load_dotenv
 import re
 import tempfile 
 import time
-from datetime import datetime, timedelta
 
 # Selenium imports
 from selenium import webdriver
@@ -33,6 +40,7 @@ def get_selenium_driver():
             options.add_argument("--window-size=1920,1080")
             options.add_argument("--log-level=3")
             
+            # This is the path for Chromium installed via packages.txt
             service = Service(executable_path='/usr/bin/chromium-driver')
 
             driver = webdriver.Chrome(service=service, options=options)
@@ -86,6 +94,114 @@ st.set_page_config(
     page_icon="💬",
     layout="centered"
 )
+
+# Load environment variables from .env file (for Google Auth)
+load_dotenv()
+try:
+    GOOGLE_CLIENT_ID = st.secrets["GOOGLE_CLIENT_ID"]
+    GOOGLE_CLIENT_SECRET = st.secrets["GOOGLE_CLIENT_SECRET"]
+except KeyError:
+    GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+    GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+
+SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+CLIENT_SECRETS_FILE = {
+    "web": {
+        "client_id": GOOGLE_CLIENT_ID,
+        "project_id": "instagram-affiliate-messenger",
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uris": ["http://localhost:8501"],
+        "javascript_origins": ["http://localhost:8501"]
+    }
+}
+if not GOOGLE_CLIENT_ID or not GOOGLE_CLIENT_SECRET:
+    st.error("Google Client ID or Secret not found. Please set them in your secrets.toml or .env file.")
+    st.stop()
+
+# --- Helper Functions for Google Sheets ---
+def get_google_credentials():
+    creds = None
+    if 'credentials' in st.session_state:
+        creds = st.session_state['credentials']
+
+    if not creds or not creds.valid:
+        if creds and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except Exception as e:
+                st.error(f"Error refreshing token: {e}")
+                creds = None
+        else:
+            flow = Flow.from_client_config(
+                CLIENT_SECRETS_FILE, SCOPES, redirect_uri='http://localhost:8501'
+            )
+            auth_url, _ = flow.authorization_url(prompt='consent')
+            st.session_state['auth_url'] = auth_url
+            st.warning("Click the button below to authenticate with Google.")
+            st.link_button("Authenticate with Google", url=auth_url)
+
+            auth_code = st.query_params.get("code")
+            if auth_code:
+                try:
+                    flow.fetch_token(code=auth_code)
+                    creds = flow.credentials
+                    st.session_state['credentials'] = creds
+                    st.success("Authentication successful!")
+                    st.query_params.clear()
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"Authentication failed: {e}")
+                    del st.session_state['auth_url']
+                    st.query_params.clear()
+                    return None
+            else:
+                return None
+    return creds
+
+@st.cache_data(ttl=3600)
+def fetch_sheet_names(sheet_id, _creds):
+    try:
+        service = google.auth.transport.requests.AuthorizedSession(_creds)
+        response = service.get(f'https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}?fields=sheets.properties.title')
+        response.raise_for_status()
+        data = response.json()
+        sheet_titles = [s['properties']['title'] for s in data.get('sheets', [])]
+        return sheet_titles
+    except Exception as e:
+        st.error(f"Error fetching sheet names: {e}")
+        return []
+
+@st.cache_data(ttl=60)
+def read_sheet_data(sheet_id, sheet_name, _creds):
+    try:
+        service = google.auth.transport.requests.AuthorizedSession(_creds)
+        response = service.get(f'https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{sheet_name}')
+        response.raise_for_status()
+        data = response.json()
+        values = data.get('values', [])
+        return values
+    except Exception as e:
+        st.error(f"Error reading sheet data: {e}")
+        return []
+
+def update_sheet_data(sheet_id, sheet_name, row_number, data_to_write, creds):
+    try:
+        service = google.auth.transport.requests.AuthorizedSession(creds)
+        range_to_update = f"{sheet_name}!H{row_number}:K{row_number}" 
+        body = {"values": [data_to_write]}
+        response = service.put(
+            f'https://sheets.googleapis.com/v4/spreadsheets/{sheet_id}/values/{range_to_update}?valueInputOption=RAW',
+            json=body
+        )
+        response.raise_for_status()
+        st.success(f"Sheet updated successfully for row {row_number}.")
+        return True
+    except Exception as e:
+        st.error(f"Error updating sheet: {e}")
+        return False
 
 # --- App UI Layout ---
 st.title("💬 Instagram Affiliate Messenger")
