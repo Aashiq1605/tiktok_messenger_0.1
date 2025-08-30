@@ -20,65 +20,48 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, NoSuchElementException, WebDriverException, InvalidArgumentException
-from selenium.webdriver.common.keys import Keys 
 from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.keys import Keys
 
-# --- Global Selenium Driver Management ---
+# --- Selenium Driver Management for Streamlit Cloud ---
 if 'driver' not in st.session_state:
     st.session_state.driver = None
 
 def get_selenium_driver():
-    """
-    Initializes and returns a Selenium WebDriver.
-    This function automatically detects if it's running locally or on Streamlit Cloud.
-    """
+    """Initializes a headless Selenium WebDriver for Streamlit Cloud."""
     if st.session_state.driver is None:
-        is_cloud = os.environ.get('STREAMLIT_SERVER_RUNNING', 'false') == 'true'
-        
         try:
-            if is_cloud:
-                st.info("🌐 Detected Streamlit Cloud environment. Initializing headless driver.")
-                options = Options()
-                options.add_argument("--headless")
-                options.add_argument("--no-sandbox")
-                options.add_argument("--disable-dev-shm-usage")
-                options.add_argument("--disable-gpu")
-                options.add_argument("--window-size=1920,1080")
-                options.add_argument("--log-level=3")
-                service = Service(executable_path='/usr/bin/chromium-driver')
-                driver = webdriver.Chrome(service=service, options=options)
-            else:
-                st.info("💻 Detected local environment. Initializing local driver.")
-                # Assumes you have chromedriver installed and in your PATH.
-                # If not, you may need to provide the path explicitly, e.g., Service(executable_path='path/to/your/chromedriver')
-                service = Service() 
-                options = Options()
-                options.add_experimental_option("detach", True) # Keep browser open after script ends
-                driver = webdriver.Chrome(service=service, options=options)
+            st.info("🌐 Initializing headless browser for Streamlit Cloud...")
+            options = Options()
+            options.add_argument("--headless")
+            options.add_argument("--no-sandbox")
+            options.add_argument("--disable-dev-shm-usage")
+            options.add_argument("--disable-gpu")
+            options.add_argument("--window-size=1920,1080")
+            options.add_argument("--log-level=3")
+            
+            # This is the path for Chromium installed via packages.txt
+            service = Service(executable_path='/usr/bin/chromium-driver')
 
+            driver = webdriver.Chrome(service=service, options=options)
             st.session_state.driver = driver
-            st.success("✅ Successfully initialized Chrome driver!")
+            st.success("✅ Successfully initialized headless Chrome driver!")
         except WebDriverException as e:
             st.error(f"❌ Failed to initialize Chrome driver: {e}")
-            if not is_cloud:
-                st.warning("For local use, ensure you have Google Chrome and a matching version of chromedriver installed and in your system's PATH. You can download chromedriver from: https://googlechromelabs.github.io/chrome-for-testing/")
+            st.warning("Ensure you have a `packages.txt` file in your repository with `chromium-driver` and `chromium` listed inside.")
             st.session_state.driver = None
             st.stop()
     return st.session_state.driver
 
 def close_selenium_driver():
-    """
-    Quits the Selenium WebDriver session.
-    """
+    """Quits the Selenium WebDriver session."""
     if st.session_state.driver:
         st.session_state.driver.quit()
         st.session_state.driver = None
         st.info("Automated browser session closed.")
 
 def apply_cookies(driver, cookies_json):
-    """
-    Deletes existing cookies and applies new ones from a JSON string.
-    """
+    """Deletes existing cookies and applies new ones from a JSON string."""
     try:
         cookies = json.loads(cookies_json)
         driver.delete_all_cookies()
@@ -88,10 +71,9 @@ def apply_cookies(driver, cookies_json):
         driver.get(base_url)
         
         for cookie in cookies:
-            # Clean up keys that cause issues with Selenium's add_cookie method
             if 'domain' in cookie: del cookie['domain']
             if 'sameSite' in cookie: del cookie['sameSite']
-            if 'expiry' in cookie: del cookie['expiry'] # 'expiry' is a float, Selenium wants 'expirationDate' as an integer
+            if 'expiry' in cookie: del cookie['expiry'] 
             
             try:
                 driver.add_cookie(cookie)
@@ -225,7 +207,7 @@ def update_sheet_data(sheet_id, sheet_name, row_number, data_to_write, creds):
 st.title("💬 Instagram Affiliate Messenger")
 st.markdown("Automate Instagram messaging.")
 
-st.info("Since this app is configured for both local and cloud use, the driver will be initialized automatically for your environment.")
+st.info("This is the cloud version. It runs in a headless browser and requires a `packages.txt` file.")
 
 # --- Cookie Management Section ---
 cookie_data = st.text_area(
@@ -313,11 +295,11 @@ status_message_placeholder = st.empty()
 
 with col1:
     start_button_disabled = st.session_state.automation_running
-    start_button = st.button("Start Messaging Session", type="primary", key="start_btn", use_container_width=True, disabled=start_button_disabled)
+    start_button = st.button("Start Messaging Session", type="primary", use_container_width=True, disabled=start_button_disabled)
 
 with col2:
     stop_button_disabled = not st.session_state.automation_running
-    stop_button = st.button("Stop Automation", type="secondary", key="stop_btn", use_container_width=True, disabled=stop_button_disabled)
+    stop_button = st.button("Stop Automation", type="secondary", use_container_width=True, disabled=stop_button_disabled)
 
 if stop_button: 
     st.session_state.automation_running = False
@@ -366,7 +348,6 @@ if st.session_state.automation_running and st.session_state.get('influencer_list
     # Base URL to apply cookies to before navigation
     base_url = "https://www.instagram.com/"
     
-    # Apply cookies and then navigate to the chat URL
     if not apply_cookies(driver, cookie_data):
         st.warning("Failed to apply cookies. Please ensure they are valid and try again.")
         st.session_state.automation_running = False
